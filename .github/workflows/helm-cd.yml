@@ -1,4 +1,4 @@
-name: Helm CD
+name: Helm deploy
 on:
   workflow_call:
     inputs:
@@ -17,6 +17,9 @@ on:
       environment:
         required: true
         type: string
+      cacheid:
+        type: string
+        default: ''
       helm-repo:
         required: false
         type: string
@@ -52,3 +55,7 @@ jobs:
       #   run: echo "namespace.${{ inputs.namespace }} kubename.${{ inputs.kubename }} environment.${{ inputs.environment }} ${{ inputs.kubename }}  ${{ inputs.helm }}  ${{ inputs.set }}"
       - name: helm deploy
         run:  helm upgrade -i ${{ inputs.helm }} -n ${{ inputs.namespace }} --wait --set "${{ inputs.set }}"
+
+      - name: clear cdn cache
+        if: ${{ inputs.cacheid != '' }}
+        run: aws cloudfront create-invalidation --distribution-id ${{ inputs.cacheid }} --paths "/*"

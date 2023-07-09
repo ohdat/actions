@@ -1,4 +1,4 @@
-name: Golnag CI new
+name: go build && Docker Build and Push
 on:
   workflow_call:
     inputs:
@@ -7,14 +7,12 @@ on:
         type: string
       VERSION:
         type: string
-        required: true
+        default: v0.1.${{ github.run_number }}
     secrets:
       DOCKERHUB_TOKEN:
         required: true
-      GIT_USER:
-        required: true
       GIT_TOKEN:
-        required: true
+        required: false
     outputs:
       image:
         description: "The image of docker build tag"
@@ -26,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     env:
       TAG: ${{ inputs.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ inputs.VERSION }}
       LATEST_TAG: ${{ inputs.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
@@ -39,7 +38,7 @@ jobs:
       - name: set GOPRIVATE
         run: |
           go env -w GOPRIVATE=github.com/ohdat
-          git config --global url."https://${{ secrets.GIT_USER }}:${{ secrets.GIT_TOKEN }}@github.com".insteadOf "https://github.com"
+          git config --global url."https://${{ secrets.GIT_TOKEN || github.token }}@github.com".insteadOf "https://github.com"
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v4
         with:
@@ -67,4 +66,3 @@ jobs:
         with:
           tag_name: ${{ inputs.VERSION  }}
           target_commitish: ${{ github.ref_name }}
-    

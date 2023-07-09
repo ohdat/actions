@@ -1,4 +1,4 @@
-name: Golnag CI new
+name: Docker Build and Push
 on:
   workflow_call:
     inputs:
@@ -7,19 +7,18 @@ on:
         type: string
       VERSION:
         type: string
-        required: true
+        default: v0.1.${{ github.run_number }}
     secrets:
       DOCKERHUB_TOKEN:
         required: true
-      GIT_USER:
-        required: true
       GIT_TOKEN:
-        required: true
+        required: false
     outputs:
       image:
         description: "The image of docker build tag"
         value: ${{ jobs.build.outputs.image }}
       version:
+        description: "The version of docker build tag"
         value: ${{ inputs.VERSION }}
 jobs:
   build:
@@ -51,9 +50,10 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.TAG }},${{ env.LATEST_TAG }}
+          build-args: |
+            GIT_TOKEN=${{ secrets.GIT_TOKEN || github.token }}
       - name: GH Release
         uses: softprops/action-gh-release@v0.1.15
         with:
           tag_name: ${{ inputs.VERSION  }}
           target_commitish: ${{ github.ref_name }}
-    
