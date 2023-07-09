@@ -12,7 +12,7 @@ on:
         default: "18"
         type: string
       BUILD_COMMANDS:
-        default: "npm run build"
+        default: "npm install && npm run build"
         type: string
     secrets:
       DOCKERHUB_TOKEN:
@@ -48,7 +48,6 @@ jobs:
       - name: private npm registry
         run: |
           echo "//npm.pkg.github.com/:_authToken=${{secrets.GIT_TOKEN || github.token}}" > ~/.npmrc
-      - run: npm install
       - name: run build
         run: ${{ inputs.BUILD_COMMANDS }}
       - name: Set up QEMU
