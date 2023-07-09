@@ -1,0 +1,61 @@
+name: Golnag CI
+env:
+  TAG: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:1.1${{ github.run_number }}
+  LATEST_TAG: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
+  GO_VERSION: 1.20
+on:
+  workflow_call:
+    outputs:
+      tag:
+        description: "The build docker output tag"
+        value: ${{ env.TAG }}
+jobs:
+  buildAndPush:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/cache@v3
+        with:
+          # In order:
+          # * Module download cache tets
+          # * Build cache (Linux)
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            %LocalAppData%\go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: set GOPRIVATE
+        run: |
+            go env -w GOPRIVATE=github.com/ohdat
+            git config --global url."https://${{ secrets.GIT_USER }}:${{ secrets.GIT_TOKEN }}@github.com".insteadOf "https://github.com"
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v2
+        with:
+          version: 1.7.0
+          args: release --rm-dist
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.TAG }},${{ env.LATEST_TAG }}

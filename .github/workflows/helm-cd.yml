@@ -1,0 +1,54 @@
+name: Helm CD
+on:
+  workflow_call:
+    inputs:
+      helm:
+        required: true
+        type: string
+      set:
+        required: true
+        type: string
+      namespace:
+        required: true
+        type: string
+      kubename:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      helm-repo:
+        required: false
+        type: string
+        default: 'https://ohdat.github.io/helm-charts/'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: update kubeconfig
+        run:   aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.10.0
+      - name: update helm repo
+        run: |
+          helm repo add ohdat ${{ inputs.helm-repo }}
+          helm repo update
+      # - name: echo inputs
+      #   run: echo "namespace.${{ inputs.namespace }} kubename.${{ inputs.kubename }} environment.${{ inputs.environment }} ${{ inputs.kubename }}  ${{ inputs.helm }}  ${{ inputs.set }}"
+      - name: helm deploy
+        run:  helm upgrade -i ${{ inputs.helm }} -n ${{ inputs.namespace }} --wait --set "${{ inputs.set }}"
