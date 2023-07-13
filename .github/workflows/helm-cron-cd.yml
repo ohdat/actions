@@ -55,4 +55,4 @@ jobs:
       # - name: echo inputs
       #   run: echo "namespace.${{ inputs.namespace }} kubename.${{ inputs.kubename }} environment.${{ inputs.environment }} ${{ inputs.kubename }}  ${{ inputs.helm }}  ${{ inputs.set }}"
       - name: helm deploy
-        run:  helm upgrade -i ${{ inputs.helm }} -n ${{ inputs.namespace }} --wait --set "${{ inputs.set }}" --set schedule="${{ inputs.schedule }}"
+        run:  helm upgrade -i ${{ inputs.helm }} -n ${{ inputs.namespace }} --set "${{ inputs.set }}" --set schedule="${{ inputs.schedule }}"
