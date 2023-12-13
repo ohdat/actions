@@ -23,7 +23,7 @@ on:
       helm-repo:
         required: false
         type: string
-        default: 'https://ohdat.github.io/helm-charts/'
+        default: 'https://ohdat.github.io/helm-template/'
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
