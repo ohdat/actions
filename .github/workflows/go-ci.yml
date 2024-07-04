@@ -8,6 +8,9 @@ on:
       VERSION:
         type: string
         default: v0.1.${{ github.run_number }}
+      DOCKERHUB_REPO:
+        type: string
+        default: ohdat
     secrets:
       DOCKERHUB_TOKEN:
         required: true
@@ -26,8 +29,8 @@ jobs:
       contents: write
 
     env:
-      TAG: ohdat/${{ github.event.repository.name }}:${{ inputs.VERSION }}
-      LATEST_TAG: ohdat/${{ github.event.repository.name }}:latest
+      TAG: ${{ inputs.DOCKERHUB_REPO }}/${{ github.event.repository.name }}:${{ inputs.VERSION }}
+      LATEST_TAG: ${{ inputs.DOCKERHUB_REPO }}/${{ github.event.repository.name }}:latest
     outputs:
       image: ${{ env.TAG }}
     steps:
