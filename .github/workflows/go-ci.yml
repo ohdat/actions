@@ -26,15 +26,15 @@ jobs:
       contents: write
 
     env:
-      TAG: ${{ inputs.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ inputs.VERSION }}
-      LATEST_TAG: ${{ inputs.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
+      TAG: ohdat/${{ github.event.repository.name }}:${{ inputs.VERSION }}
+      LATEST_TAG: ohdat/${{ github.event.repository.name }}:latest
     outputs:
       image: ${{ env.TAG }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Go environment
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
       - name: set GOPRIVATE
         run: |
           go env -w GOPRIVATE=github.com/ohdat
