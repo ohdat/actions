@@ -47,6 +47,7 @@ jobs:
         with:
           args: release --clean --snapshot
       - run: mv dist/gomain_linux_amd64_v1 dist/gomain_linux_amd64
+      - run: ls -al dist
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
