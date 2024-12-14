@@ -11,11 +11,6 @@ on:
       DOCKERHUB_REPO:
         type: string
         default: ohdat
-    secrets:
-      DOCKERHUB_TOKEN:
-        required: true
-      GIT_TOKEN:
-        required: false
     outputs:
       image:
         description: "The image of docker build tag"
