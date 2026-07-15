@@ -44,6 +44,9 @@ on:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
+      # Optional PAT with read:packages when oci charts are private
+      GIT_TOKEN:
+        required: false
 
 jobs:
   deploy:
@@ -79,7 +82,7 @@ jobs:
           HELM_SET: ${{ inputs.set }}
           NAMESPACE: ${{ inputs.namespace }}
           CHART_VERSION: ${{ inputs.chart-version }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
         run: |
           set -euo pipefail
 
