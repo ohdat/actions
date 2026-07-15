@@ -1,8 +1,11 @@
 name: Helm cron CD
+
+# Same OCI/legacy dual support as helm-cd.yml, plus schedule override for cronjob charts.
 on:
   workflow_call:
     inputs:
       helm:
+        description: "Release and chart, e.g. 'renew-creator cronjob'"
         required: true
         type: string
       set:
@@ -20,7 +23,11 @@ on:
       helm-repo:
         required: false
         type: string
-        default: 'https://ohdat.github.io/helm-charts/'
+        default: "oci://ghcr.io/ohdat/charts"
+      chart-version:
+        required: false
+        type: string
+        default: ""
       schedule:
         type: string
         required: false
@@ -30,29 +37,85 @@ on:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
       - name: AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      - name: update kubeconfig
-        run:   aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
+
       - name: Install Helm
-        uses: azure/setup-helm@v3
+        uses: azure/setup-helm@v4
         with:
-          version: v3.10.0
-      - name: update helm repo
+          version: v3.14.4
+
+      - name: Resolve chart and deploy
+        env:
+          HELM_REPO: ${{ inputs.helm-repo }}
+          HELM_INPUT: ${{ inputs.helm }}
+          HELM_SET: ${{ inputs.set }}
+          NAMESPACE: ${{ inputs.namespace }}
+          CHART_VERSION: ${{ inputs.chart-version }}
+          SCHEDULE: ${{ inputs.schedule }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          helm repo add ohdat ${{ inputs.helm-repo }}
-          helm repo update
-      # - name: echo inputs
-      #   run: echo "namespace.${{ inputs.namespace }} kubename.${{ inputs.kubename }} environment.${{ inputs.environment }} ${{ inputs.kubename }}  ${{ inputs.helm }}  ${{ inputs.set }}"
-      - name: helm deploy
-        run:  helm upgrade -i ${{ inputs.helm }} -n ${{ inputs.namespace }} --set "${{ inputs.set }}" --set schedule="${{ inputs.schedule }}"
+          set -euo pipefail
+
+          RELEASE="$(echo "${HELM_INPUT}" | awk '{print $1}')"
+          CHART_REF="$(echo "${HELM_INPUT}" | awk '{print $2}')"
+          if [ -z "${RELEASE}" ] || [ -z "${CHART_REF}" ]; then
+            echo "::error::inputs.helm must be '<release> <chart>', got: ${HELM_INPUT}"
+            exit 1
+          fi
+
+          VER_ARGS=()
+          if [ -n "${CHART_VERSION}" ]; then
+            VER_ARGS=(--version "${CHART_VERSION}")
+          fi
+
+          if [[ "${HELM_REPO}" == oci://* ]] || [[ "${CHART_REF}" == oci://* ]]; then
+            if [[ "${CHART_REF}" == oci://* ]]; then
+              CHART="${CHART_REF}"
+            else
+              CHART_NAME="${CHART_REF#ohdat/}"
+              CHART="${HELM_REPO%/}/${CHART_NAME}"
+            fi
+
+            echo "OCI cron deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} ns=${NAMESPACE}"
+            echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            helm upgrade --install "${RELEASE}" "${CHART}" \
+              "${VER_ARGS[@]}" \
+              -n "${NAMESPACE}" \
+              --create-namespace \
+              --wait \
+              --timeout 10m \
+              --history-max 5 \
+              --set "${HELM_SET}" \
+              --set "schedule=${SCHEDULE}"
+          else
+            helm repo add ohdat "${HELM_REPO}"
+            helm repo update
+            helm upgrade --install ${HELM_INPUT} \
+              -n "${NAMESPACE}" \
+              --create-namespace \
+              --wait \
+              --timeout 10m \
+              --history-max 5 \
+              --set "${HELM_SET}" \
+              --set "schedule=${SCHEDULE}"
+          fi

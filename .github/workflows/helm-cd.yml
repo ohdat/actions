@@ -1,8 +1,17 @@
 name: Helm deploy
+
+# Deploys a chart from either:
+#   - OCI (default): oci://ghcr.io/ohdat/charts/<name>  (ohdat/helm-temp)
+#   - Legacy HTTP helm repo: https://ohdat.github.io/helm-template/
+#
+# inputs.helm format: "<release> <chart>"
+#   chart examples:
+#     service | ohdat/service | oci://ghcr.io/ohdat/charts/service
 on:
   workflow_call:
     inputs:
       helm:
+        description: "Release and chart, e.g. 'http-creator service' or 'http-creator ohdat/service'"
         required: true
         type: string
       set:
@@ -19,44 +28,109 @@ on:
         type: string
       cacheid:
         type: string
-        default: ''
+        default: ""
+      # OCI base (default) or legacy HTTP helm repo URL
       helm-repo:
         required: false
         type: string
-        default: 'https://ohdat.github.io/helm-template/'
+        default: "oci://ghcr.io/ohdat/charts"
+      # Optional chart version pin, e.g. 1.2.0 (recommended for OCI)
+      chart-version:
+        required: false
+        type: string
+        default: ""
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: "Configure AWS Credentials" 
-        uses: aws-actions/configure-aws-credentials@v4.0.2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_AK }}
-          aws-secret-access-key: ${{ secrets.AWS_SK }}
-          aws-region: us-east-1
-      - name: update kubeconfig
-        run:   aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
-      - name: Install Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: v3.10.0
-      - name: update helm repo
-        run: |
-          helm repo add ohdat ${{ inputs.helm-repo }}
-          helm repo update
-      # - name: echo inputs
-      #   run: echo "namespace.${{ inputs.namespace }} kubename.${{ inputs.kubename }} environment.${{ inputs.environment }} ${{ inputs.kubename }}  ${{ inputs.helm }}  ${{ inputs.set }}"
-      - name: helm deploy
-        run:  helm upgrade -i ${{ inputs.helm }} -n ${{ inputs.namespace }} --wait --set "${{ inputs.set }}"
 
-      - name: clear cdn cache
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          # Helm ≥ 3.8 required for OCI; 3.14+ recommended by helm-temp
+          version: v3.14.4
+
+      - name: Resolve chart and deploy
+        env:
+          HELM_REPO: ${{ inputs.helm-repo }}
+          HELM_INPUT: ${{ inputs.helm }}
+          HELM_SET: ${{ inputs.set }}
+          NAMESPACE: ${{ inputs.namespace }}
+          CHART_VERSION: ${{ inputs.chart-version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Parse "<release> <chart>"
+          RELEASE="$(echo "${HELM_INPUT}" | awk '{print $1}')"
+          CHART_REF="$(echo "${HELM_INPUT}" | awk '{print $2}')"
+          if [ -z "${RELEASE}" ] || [ -z "${CHART_REF}" ]; then
+            echo "::error::inputs.helm must be '<release> <chart>', got: ${HELM_INPUT}"
+            exit 1
+          fi
+
+          VER_ARGS=()
+          if [ -n "${CHART_VERSION}" ]; then
+            VER_ARGS=(--version "${CHART_VERSION}")
+          fi
+
+          if [[ "${HELM_REPO}" == oci://* ]] || [[ "${CHART_REF}" == oci://* ]]; then
+            # ---- OCI path (ohdat/helm-temp → ghcr.io/ohdat/charts) ----
+            if [[ "${CHART_REF}" == oci://* ]]; then
+              CHART="${CHART_REF}"
+            else
+              # strip optional "ohdat/" prefix from legacy "ohdat/service"
+              CHART_NAME="${CHART_REF#ohdat/}"
+              CHART="${HELM_REPO%/}/${CHART_NAME}"
+            fi
+
+            echo "OCI deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} ns=${NAMESPACE}"
+            echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            helm upgrade --install "${RELEASE}" "${CHART}" \
+              "${VER_ARGS[@]}" \
+              -n "${NAMESPACE}" \
+              --create-namespace \
+              --wait \
+              --timeout 10m \
+              --history-max 5 \
+              --set "${HELM_SET}"
+          else
+            # ---- Legacy HTTP helm repo ----
+            echo "Legacy repo deploy: release=${RELEASE} chart=${CHART_REF} repo=${HELM_REPO} ns=${NAMESPACE}"
+            helm repo add ohdat "${HELM_REPO}"
+            helm repo update
+            helm upgrade --install ${HELM_INPUT} \
+              -n "${NAMESPACE}" \
+              --create-namespace \
+              --wait \
+              --timeout 10m \
+              --history-max 5 \
+              --set "${HELM_SET}"
+          fi
+
+      - name: Clear CDN cache
         if: ${{ inputs.cacheid != '' }}
         run: aws cloudfront create-invalidation --distribution-id ${{ inputs.cacheid }} --paths "/*"
