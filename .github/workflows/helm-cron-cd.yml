@@ -1,6 +1,20 @@
-name: Helm cron CD
+name: Helm cron CD (Civo + OCI)
 
-# Same OCI/legacy dual support as helm-cd.yml, plus schedule override for cronjob charts.
+# Same as helm-cd.yml, plus schedule override for cronjob charts.
+#
+# Usage:
+#   jobs:
+#     deploy:
+#       uses: ohdat/actions/.github/workflows/helm-cron-cd.yml@master
+#       with:
+#         environment: produce
+#         namespace: backend
+#         helm: renew-creator cronjob
+#         set: "image.repository=ghcr.io/ohdat/creator:v0.1.9-dev,resources=null"
+#         schedule: "0 0 * * *"
+#         chart-version: "1.1.0"
+#       secrets:
+#         CIVO_TOKEN: ${{ secrets.CIVO_TOKEN }}
 on:
   workflow_call:
     inputs:
@@ -14,12 +28,22 @@ on:
       namespace:
         required: true
         type: string
-      kubename:
-        required: true
-        type: string
       environment:
         required: true
         type: string
+      cluster:
+        type: string
+        required: false
+        default: "ele-prod"
+      region:
+        type: string
+        required: false
+        default: "nyc1"
+      # Deprecated EKS name — ignored
+      kubename:
+        type: string
+        required: false
+        default: ""
       helm-repo:
         required: false
         type: string
@@ -33,11 +57,13 @@ on:
         required: false
         default: "0 0 * * *"
     secrets:
-      AWS_ACCESS_KEY_ID:
-        required: true
-      AWS_SECRET_ACCESS_KEY:
+      CIVO_TOKEN:
         required: true
       GIT_TOKEN:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
         required: false
 
 jobs:
@@ -50,20 +76,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
+      - name: Install Civo CLI
+        run: |
+          set -euo pipefail
+          curl -sL https://civo.com/get | sh
+          if ! command -v civo >/dev/null 2>&1; then
+            sudo install -m 755 ./civo /usr/local/bin/civo
+          fi
+          civo version
 
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
           version: v3.14.4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig (Civo)
+        env:
+          CIVO_TOKEN: ${{ secrets.CIVO_TOKEN }}
+          CIVO_CLUSTER: ${{ inputs.cluster }}
+          CIVO_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CIVO_TOKEN}" ]; then
+            echo "::error::CIVO_TOKEN secret is empty."
+            exit 1
+          fi
+          if [ -n "${{ inputs.kubename }}" ] && [ "${{ inputs.kubename }}" != "${CIVO_CLUSTER}" ]; then
+            echo "::warning::inputs.kubename is deprecated (AWS EKS). Using Civo cluster=${CIVO_CLUSTER}."
+          fi
+          mkdir -p "${HOME}/.kube"
+          civo kubernetes config "${CIVO_CLUSTER}" \
+            --region "${CIVO_REGION}" \
+            --save \
+            --overwrite \
+            --local-path "${HOME}/.kube/config" \
+            --yes
+          kubectl config current-context
+          kubectl get nodes -o wide
+
+      - name: Ensure namespace
+        run: |
+          kubectl create namespace "${{ inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Resolve chart and deploy
         env:
@@ -74,6 +130,7 @@ jobs:
           CHART_VERSION: ${{ inputs.chart-version }}
           SCHEDULE: ${{ inputs.schedule }}
           GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
+          CIVO_CLUSTER: ${{ inputs.cluster }}
         run: |
           set -euo pipefail
 
@@ -97,7 +154,7 @@ jobs:
               CHART="${HELM_REPO%/}/${CHART_NAME}"
             fi
 
-            echo "OCI cron deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} ns=${NAMESPACE}"
+            echo "OCI cron deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} schedule=${SCHEDULE} ns=${NAMESPACE}"
             echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             helm upgrade --install "${RELEASE}" "${CHART}" \
@@ -110,6 +167,7 @@ jobs:
               --set "${HELM_SET}" \
               --set "schedule=${SCHEDULE}"
           else
+            echo "::warning::Using legacy helm-repo=${HELM_REPO}. Prefer oci://ghcr.io/ohdat/charts."
             helm repo add ohdat "${HELM_REPO}"
             helm repo update
             helm upgrade --install ${HELM_INPUT} \
@@ -121,3 +179,25 @@ jobs:
               --set "${HELM_SET}" \
               --set "schedule=${SCHEDULE}"
           fi
+
+      - name: Status
+        if: always()
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          HELM_INPUT: ${{ inputs.helm }}
+          CIVO_CLUSTER: ${{ inputs.cluster }}
+          SCHEDULE: ${{ inputs.schedule }}
+        run: |
+          RELEASE="$(echo "${HELM_INPUT}" | awk '{print $1}')"
+          {
+            echo "## Civo Helm cron deploy"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Cluster | \`${CIVO_CLUSTER}\` |"
+            echo "| Namespace | \`${NAMESPACE}\` |"
+            echo "| Release | \`${RELEASE}\` |"
+            echo "| Schedule | \`${SCHEDULE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n "$NAMESPACE" get cronjob,po 2>/dev/null || true
+          helm -n "$NAMESPACE" status "$RELEASE" 2>/dev/null || true

@@ -1,64 +1,135 @@
-name: Docker Build and Push
+name: Docker Build and Push (GHCR)
+
+# Build multi-arch image and push to GitHub Container Registry.
+# Image: ghcr.io/<owner>/<repo>:<VERSION> (+ :latest on default branch tags as requested)
+#
+# Usage:
+#   jobs:
+#     build:
+#       uses: ohdat/actions/.github/workflows/docker-ci.yml@master
+#       with:
+#         VERSION: v0.1.${{ github.run_number }}
+#       secrets:
+#         GIT_TOKEN: ${{ secrets.GIT_TOKEN }}  # optional, private build deps
 on:
   workflow_call:
     inputs:
-      DOCKERHUB_USERNAME:
-        default: ohdat123
-        type: string
       VERSION:
         type: string
         default: v0.1.${{ github.run_number }}
+      # Optional override; default ghcr.io/<owner>/<repo> (lowercase)
+      IMAGE_NAME:
+        type: string
+        required: false
+        default: ""
+      # Kept for backward compatibility with old callers; ignored (GHCR is used)
+      DOCKERHUB_USERNAME:
+        type: string
+        required: false
+        default: ""
       DOCKERHUB_REPO:
         type: string
-        default: ohdat
+        required: false
+        default: ""
     secrets:
-      DOCKERHUB_TOKEN:
-        required: true
+      # Optional PAT for private git deps during docker build
       GIT_TOKEN:
+        required: false
+      # Deprecated: Docker Hub is no longer used. Accepted so old callers do not fail schema checks.
+      DOCKERHUB_TOKEN:
         required: false
     outputs:
       image:
-        description: "The image of docker build tag"
+        description: "Full image ref including tag"
         value: ${{ jobs.build.outputs.image }}
       version:
-        description: "The version of docker build tag"
-        value: ${{ inputs.VERSION }}
+        description: "Image tag / version"
+        value: ${{ jobs.build.outputs.version }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      TAG: ${{ inputs.DOCKERHUB_REPO }}/${{ github.event.repository.name }}:${{ inputs.VERSION }}
-      LATEST_TAG: ${{ inputs.DOCKERHUB_REPO }}/${{ github.event.repository.name }}:latest
+      packages: write
     outputs:
-      image: ${{ env.TAG }}
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Resolve image name and tags
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.VERSION }}"
+          if [ -n "${{ inputs.IMAGE_NAME }}" ]; then
+            IMAGE="${{ inputs.IMAGE_NAME }}"
+          else
+            IMAGE="ghcr.io/${{ github.repository }}"
+          fi
+          IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          TAGS="${IMAGE}:${VERSION}"
+          # Also tag latest when version has no -dev suffix
+          if [[ "${VERSION}" != *"-dev"* ]]; then
+            TAGS="${TAGS},${IMAGE}:latest"
+          else
+            TAGS="${TAGS},${IMAGE}:dev"
+          fi
+          {
+            echo "image=${IMAGE}:${VERSION}"
+            echo "version=${VERSION}"
+            echo "tags=${TAGS}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${IMAGE}:${VERSION}"
+
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-      - name: Login to DockerHub
-        uses: docker/login-action@v2
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          username: ${{ inputs.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build and push Docker images
-        uses: docker/build-push-action@v4.1.1
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.TAG }},${{ env.LATEST_TAG }}
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             GIT_TOKEN=${{ secrets.GIT_TOKEN || github.token }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+
       - name: GH Release
-        uses: softprops/action-gh-release@v0.1.15
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.VERSION  }}
+          tag_name: ${{ steps.meta.outputs.version }}
           target_commitish: ${{ github.ref_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## Docker image (GHCR)"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Image | \`${{ steps.meta.outputs.image }}\` |"
+            echo "| Version | \`${{ steps.meta.outputs.version }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,51 +1,78 @@
-name: Helm deploy
+name: Helm deploy (Civo + OCI)
 
-# Deploys a chart from either:
-#   - OCI (default): oci://ghcr.io/ohdat/charts/<name>  (ohdat/helm-temp)
-#   - Legacy HTTP helm repo: https://ohdat.github.io/helm-template/
+# Deploy to Civo K3s using charts from ohdat/helm-temp (OCI / GHCR).
 #
 # inputs.helm format: "<release> <chart>"
-#   chart examples:
-#     service | ohdat/service | oci://ghcr.io/ohdat/charts/service
+#   chart examples: service | grpc | command | cronjob | ohdat/service | oci://ghcr.io/ohdat/charts/service
+#
+# Usage:
+#   jobs:
+#     deploy:
+#       uses: ohdat/actions/.github/workflows/helm-cd.yml@master
+#       with:
+#         environment: produce
+#         namespace: backend
+#         helm: http-creator service
+#         set: "image.repository=ghcr.io/ohdat/creator:v0.1.9-dev,resources=null,gateway.hosts[0]=creator.elevatrix.xyz,gateway.create=false,gateway.existingGateway=istio-system/elevatrix-gateway"
+#         chart-version: "1.2.1"
+#       secrets:
+#         CIVO_TOKEN: ${{ secrets.CIVO_TOKEN }}
+#         GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
 on:
   workflow_call:
     inputs:
       helm:
-        description: "Release and chart, e.g. 'http-creator service' or 'http-creator ohdat/service'"
+        description: "Release and chart, e.g. 'http-creator service'"
         required: true
         type: string
       set:
+        description: "Comma-separated helm --set values"
         required: true
         type: string
       namespace:
         required: true
         type: string
-      kubename:
-        required: true
-        type: string
       environment:
         required: true
         type: string
-      cacheid:
+      # Civo cluster (default: elevatrix prod)
+      cluster:
         type: string
+        required: false
+        default: "ele-prod"
+      region:
+        type: string
+        required: false
+        default: "nyc1"
+      # Deprecated EKS cluster name — ignored (kept so old callers do not fail schema checks)
+      kubename:
+        type: string
+        required: false
         default: ""
       # OCI base (default) or legacy HTTP helm repo URL
       helm-repo:
         required: false
         type: string
         default: "oci://ghcr.io/ohdat/charts"
-      # Optional chart version pin, e.g. 1.2.0 (recommended for OCI)
+      # Optional chart version pin (recommended for OCI), e.g. 1.2.1 for service
       chart-version:
         required: false
         type: string
         default: ""
+      # Deprecated CloudFront invalidation id — no longer used on Civo
+      cacheid:
+        type: string
+        default: ""
     secrets:
-      AWS_ACCESS_KEY_ID:
+      CIVO_TOKEN:
         required: true
-      AWS_SECRET_ACCESS_KEY:
-        required: true
-      # Optional PAT with read:packages when oci charts are private
+      # Optional PAT with read:packages when OCI charts are private
       GIT_TOKEN:
+        required: false
+      # Deprecated AWS secrets — accepted for old callers, not used
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
         required: false
 
 jobs:
@@ -59,21 +86,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --region us-east-1 --name ${{ inputs.kubename }}
+      - name: Install Civo CLI
+        run: |
+          set -euo pipefail
+          curl -sL https://civo.com/get | sh
+          if ! command -v civo >/dev/null 2>&1; then
+            sudo install -m 755 ./civo /usr/local/bin/civo
+          fi
+          civo version
 
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
-          # Helm ≥ 3.8 required for OCI; 3.14+ recommended by helm-temp
+          # Helm ≥ 3.8 required for OCI; helm-temp recommends 3.14+
           version: v3.14.4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig (Civo)
+        env:
+          CIVO_TOKEN: ${{ secrets.CIVO_TOKEN }}
+          CIVO_CLUSTER: ${{ inputs.cluster }}
+          CIVO_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CIVO_TOKEN}" ]; then
+            echo "::error::CIVO_TOKEN secret is empty. Add it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          if [ -n "${{ inputs.kubename }}" ] && [ "${{ inputs.kubename }}" != "ele-prod" ] && [ "${{ inputs.kubename }}" != "${CIVO_CLUSTER}" ]; then
+            echo "::warning::inputs.kubename='${{ inputs.kubename }}' is deprecated (was AWS EKS). Using Civo cluster='${CIVO_CLUSTER}' region='${CIVO_REGION}'."
+          fi
+          mkdir -p "${HOME}/.kube"
+          # Civo CLI v1.5+: former `kubernetesconfig save` is now `kubernetes config --save`
+          civo kubernetes config "${CIVO_CLUSTER}" \
+            --region "${CIVO_REGION}" \
+            --save \
+            --overwrite \
+            --local-path "${HOME}/.kube/config" \
+            --yes
+          kubectl config current-context
+          kubectl cluster-info
+          kubectl get nodes -o wide
+
+      - name: Ensure namespace
+        run: |
+          kubectl create namespace "${{ inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Resolve chart and deploy
         env:
@@ -83,10 +142,11 @@ jobs:
           NAMESPACE: ${{ inputs.namespace }}
           CHART_VERSION: ${{ inputs.chart-version }}
           GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
+          CIVO_CLUSTER: ${{ inputs.cluster }}
+          CIVO_REGION: ${{ inputs.region }}
         run: |
           set -euo pipefail
 
-          # Parse "<release> <chart>"
           RELEASE="$(echo "${HELM_INPUT}" | awk '{print $1}')"
           CHART_REF="$(echo "${HELM_INPUT}" | awk '{print $2}')"
           if [ -z "${RELEASE}" ] || [ -z "${CHART_REF}" ]; then
@@ -109,7 +169,7 @@ jobs:
               CHART="${HELM_REPO%/}/${CHART_NAME}"
             fi
 
-            echo "OCI deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} ns=${NAMESPACE}"
+            echo "OCI deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} ns=${NAMESPACE} cluster=${CIVO_CLUSTER}"
             echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             helm upgrade --install "${RELEASE}" "${CHART}" \
@@ -121,8 +181,8 @@ jobs:
               --history-max 5 \
               --set "${HELM_SET}"
           else
-            # ---- Legacy HTTP helm repo ----
-            echo "Legacy repo deploy: release=${RELEASE} chart=${CHART_REF} repo=${HELM_REPO} ns=${NAMESPACE}"
+            # ---- Legacy HTTP helm repo (not recommended) ----
+            echo "::warning::Using legacy helm-repo=${HELM_REPO}. Prefer oci://ghcr.io/ohdat/charts (ohdat/helm-temp)."
             helm repo add ohdat "${HELM_REPO}"
             helm repo update
             helm upgrade --install ${HELM_INPUT} \
@@ -134,6 +194,30 @@ jobs:
               --set "${HELM_SET}"
           fi
 
-      - name: Clear CDN cache
-        if: ${{ inputs.cacheid != '' }}
-        run: aws cloudfront create-invalidation --distribution-id ${{ inputs.cacheid }} --paths "/*"
+      - name: Status
+        if: always()
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          HELM_INPUT: ${{ inputs.helm }}
+          CIVO_CLUSTER: ${{ inputs.cluster }}
+          CIVO_REGION: ${{ inputs.region }}
+          HELM_REPO: ${{ inputs.helm-repo }}
+          CHART_VERSION: ${{ inputs.chart-version }}
+        run: |
+          set -euo pipefail
+          RELEASE="$(echo "${HELM_INPUT}" | awk '{print $1}')"
+          {
+            echo "## Civo Helm deploy (OCI / helm-temp)"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Cluster | \`${CIVO_CLUSTER}\` (${CIVO_REGION}) |"
+            echo "| Namespace | \`${NAMESPACE}\` |"
+            echo "| Release | \`${RELEASE}\` |"
+            echo "| Chart repo | \`${HELM_REPO}\` |"
+            echo "| Chart version | \`${CHART_VERSION:-latest}\` |"
+            echo "| set | \`${{ inputs.set }}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n "$NAMESPACE" get deploy,po,svc 2>/dev/null || true
+          helm -n "$NAMESPACE" status "$RELEASE" 2>/dev/null || true
