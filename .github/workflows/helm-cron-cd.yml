@@ -37,6 +37,8 @@ on:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
+      GIT_TOKEN:
+        required: false
 
 jobs:
   deploy:
@@ -71,7 +73,7 @@ jobs:
           NAMESPACE: ${{ inputs.namespace }}
           CHART_VERSION: ${{ inputs.chart-version }}
           SCHEDULE: ${{ inputs.schedule }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
         run: |
           set -euo pipefail
 
