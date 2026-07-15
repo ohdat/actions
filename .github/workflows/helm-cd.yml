@@ -141,7 +141,8 @@ jobs:
           HELM_SET: ${{ inputs.set }}
           NAMESPACE: ${{ inputs.namespace }}
           CHART_VERSION: ${{ inputs.chart-version }}
-          GH_TOKEN: ${{ github.token }}
+          # Prefer PAT with repo+packages for private charts; fallback github.token
+          GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
           CIVO_CLUSTER: ${{ inputs.cluster }}
           CIVO_REGION: ${{ inputs.region }}
         run: |
@@ -154,35 +155,64 @@ jobs:
             exit 1
           fi
 
-          VER_ARGS=()
-          if [ -n "${CHART_VERSION}" ]; then
-            VER_ARGS=(--version "${CHART_VERSION}")
+          CHART_NAME="${CHART_REF#ohdat/}"
+          if [[ "${CHART_REF}" == oci://* ]]; then
+            CHART_NAME="$(basename "${CHART_REF}")"
           fi
 
-          if [[ "${HELM_REPO}" == oci://* ]] || [[ "${CHART_REF}" == oci://* ]]; then
-            # ---- OCI path (ohdat/helm-temp → ghcr.io/ohdat/charts) ----
-            if [[ "${CHART_REF}" == oci://* ]]; then
-              CHART="${CHART_REF}"
-            else
-              # strip optional "ohdat/" prefix from legacy "ohdat/service"
-              CHART_NAME="${CHART_REF#ohdat/}"
-              CHART="${HELM_REPO%/}/${CHART_NAME}"
+          deploy_from_git() {
+            echo "Git chart deploy: release=${RELEASE} chart=${CHART_NAME} repo=ohdat/helm-temp ns=${NAMESPACE}"
+            rm -rf /tmp/helm-temp
+            git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/ohdat/helm-temp.git" /tmp/helm-temp
+            CHART_PATH="/tmp/helm-temp/charts/${CHART_NAME}"
+            if [ ! -d "${CHART_PATH}" ]; then
+              echo "::error::Chart path not found: ${CHART_PATH}"
+              ls -la /tmp/helm-temp/charts || true
+              exit 1
             fi
-
-            echo "OCI deploy: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest} ns=${NAMESPACE} cluster=${CIVO_CLUSTER}"
-            echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-            helm upgrade --install "${RELEASE}" "${CHART}" \
-              "${VER_ARGS[@]}" \
+            helm upgrade --install "${RELEASE}" "${CHART_PATH}" \
               -n "${NAMESPACE}" \
               --create-namespace \
               --wait \
               --timeout 10m \
               --history-max 5 \
               --set "${HELM_SET}"
+          }
+
+          if [[ "${HELM_REPO}" == oci://* ]] || [[ "${CHART_REF}" == oci://* ]]; then
+            # ---- Prefer OCI; fall back to git clone of helm-temp (private packages often 403) ----
+            if [[ "${CHART_REF}" == oci://* ]]; then
+              CHART="${CHART_REF}"
+            else
+              CHART="${HELM_REPO%/}/${CHART_NAME}"
+            fi
+
+            echo "Trying OCI: release=${RELEASE} chart=${CHART} version=${CHART_VERSION:-latest}"
+            echo "${GH_TOKEN}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin || true
+
+            VER_ARGS=()
+            if [ -n "${CHART_VERSION}" ]; then
+              VER_ARGS=(--version "${CHART_VERSION}")
+            fi
+
+            if helm upgrade --install "${RELEASE}" "${CHART}" \
+              "${VER_ARGS[@]}" \
+              -n "${NAMESPACE}" \
+              --create-namespace \
+              --wait \
+              --timeout 10m \
+              --history-max 5 \
+              --set "${HELM_SET}"; then
+              echo "OCI deploy succeeded"
+            else
+              echo "::warning::OCI chart pull/deploy failed; falling back to git clone ohdat/helm-temp"
+              deploy_from_git
+            fi
+          elif [[ "${HELM_REPO}" == git://* ]] || [[ "${HELM_REPO}" == "ohdat/helm-temp" ]]; then
+            deploy_from_git
           else
-            # ---- Legacy HTTP helm repo (not recommended) ----
-            echo "::warning::Using legacy helm-repo=${HELM_REPO}. Prefer oci://ghcr.io/ohdat/charts (ohdat/helm-temp)."
+            # ---- Legacy HTTP helm repo ----
+            echo "::warning::Using legacy helm-repo=${HELM_REPO}. Prefer oci:// or git helm-temp."
             helm repo add ohdat "${HELM_REPO}"
             helm repo update
             helm upgrade --install ${HELM_INPUT} \
