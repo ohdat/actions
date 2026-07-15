@@ -141,7 +141,7 @@ jobs:
           HELM_SET: ${{ inputs.set }}
           NAMESPACE: ${{ inputs.namespace }}
           CHART_VERSION: ${{ inputs.chart-version }}
-          GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           CIVO_CLUSTER: ${{ inputs.cluster }}
           CIVO_REGION: ${{ inputs.region }}
         run: |
