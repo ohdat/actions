@@ -129,7 +129,7 @@ jobs:
           NAMESPACE: ${{ inputs.namespace }}
           CHART_VERSION: ${{ inputs.chart-version }}
           SCHEDULE: ${{ inputs.schedule }}
-          GH_TOKEN: ${{ secrets.GIT_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           CIVO_CLUSTER: ${{ inputs.cluster }}
         run: |
           set -euo pipefail
